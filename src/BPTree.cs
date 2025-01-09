@@ -48,6 +48,20 @@
         }
     }
 
+    public class DeleteResult
+    {
+        public bool KeyDeleted { get; set; }
+        public bool NeedRebalancing { get; set; }
+        public int? BorrowedKey { get; set; }
+
+        public DeleteResult(bool keyDeleted, bool needRebalancing, int? borrowedKey = null)
+        {
+            KeyDeleted = keyDeleted;
+            NeedRebalancing = needRebalancing;
+            BorrowedKey = borrowedKey;
+        }
+    }
+
     public class BPTree
     {
         private int _order { get; set; }
@@ -59,6 +73,7 @@
             this._root = null;
         }
 
+        #region Insert
         public void Insert(int k)
         {
             if (_root == null) // on first insert
@@ -203,7 +218,365 @@
             return new SplitResult(medianKey, newRight);
         }
 
-        public void LevelOrderTraversal()
+        #endregion
+
+        #region Search
+        private LeafNode? FindNodeWithKey(INode? node, int key)
+        {
+            if (node == null)
+            {
+                return null;
+            }
+
+            int i = 0;
+
+            while (i < node.KeysCount && key >= node.Keys[i])
+            {
+                i++;
+            }
+
+            if (node is LeafNode leaf)
+            {
+                for (int j = 0; j < leaf.KeysCount; j++)
+                {
+                    if (leaf.Keys[j] == key)
+                    {
+                        return leaf;
+                    }
+                }
+                return null;
+            }
+            else if (node is InternalNode ino)
+            {
+                return FindNodeWithKey(ino.Children[i], key);
+            }
+            else
+            {
+                throw new Exception("Unexpected node type");
+            }
+        }
+
+        public LeafNode? Search(int key)
+        {
+            return FindNodeWithKey(_root, key);
+        }
+
+        #endregion
+
+        #region  Delete
+        public void Delete(int key)
+        {
+            if (_root == null) return;
+
+            var deleteResult = DeleteAndMerge(_root, key, null, -1);
+
+            // If root becomes empty after deletion and it's an internal node
+            if (_root is InternalNode && _root.KeysCount == 0)
+            {
+                _root = ((InternalNode)_root).Children[0];
+            }
+            // If root is a leaf and becomes empty, set root to null
+            else if (_root is LeafNode && _root.KeysCount == 0)
+            {
+                _root = null;
+            }
+        }
+
+        private DeleteResult DeleteAndMerge(INode node, int key, InternalNode? parent, int childIndex)
+        {
+            int minKeys = (_order - 1) / 2;
+
+            if (node is LeafNode leaf)
+            {
+                // Find and delete the key
+                int keyIndex = -1;
+                for (int i = 0; i < leaf.KeysCount; i++)
+                {
+                    if (leaf.Keys[i] == key)
+                    {
+                        keyIndex = i;
+                        break;
+                    }
+                }
+
+                // If key not found, return
+                if (keyIndex == -1)
+                {
+                    return new DeleteResult(false, false);
+                }
+
+                // Remove the key by shifting remaining keys
+                for (int i = keyIndex; i < leaf.KeysCount - 1; i++)
+                {
+                    leaf.Keys[i] = leaf.Keys[i + 1];
+                }
+                leaf.KeysCount--;
+
+                // Check if node needs rebalancing
+                bool needsRebalancing = leaf.KeysCount < minKeys;
+                return new DeleteResult(true, needsRebalancing);
+            }
+            else if (node is InternalNode internal_node)
+            {
+                // Find the child node that should contain the key
+                int childPos = 0;
+                while (childPos < internal_node.KeysCount && key >= internal_node.Keys[childPos])
+                {
+                    childPos++;
+                }
+
+                var deleteResult = DeleteAndMerge(internal_node.Children[childPos], key, internal_node, childPos);
+
+                // If key wasn't deleted, no further action needed
+                if (!deleteResult.KeyDeleted)
+                {
+                    return deleteResult;
+                }
+
+                // Update parent key if it was changed due to borrowing
+                if (deleteResult.BorrowedKey.HasValue && childPos > 0)
+                {
+                    internal_node.Keys[childPos - 1] = deleteResult.BorrowedKey.Value;
+                }
+
+                // Handle rebalancing if needed
+                if (deleteResult.NeedRebalancing)
+                {
+                    return RebalanceAfterDelete(internal_node, childPos, parent, childIndex);
+                }
+
+                return new DeleteResult(true, false);
+            }
+
+            throw new Exception("Unexpected node type");
+        }
+
+        private DeleteResult RebalanceAfterDelete(InternalNode parent, int childIndex, InternalNode? grandParent, int parentIndex)
+        {
+            int minKeys = (_order - 1) / 2;
+            INode child = parent.Children[childIndex];
+
+            // Try borrowing from left sibling
+            if (childIndex > 0)
+            {
+                INode leftSibling = parent.Children[childIndex - 1];
+                if (leftSibling.KeysCount > minKeys)
+                {
+                    BorrowFromLeftSibling(parent, childIndex, child, leftSibling);
+                    return new DeleteResult(true, false);
+                }
+            }
+
+            // Try borrowing from right sibling
+            if (childIndex < parent.KeysCount)
+            {
+                INode rightSibling = parent.Children[childIndex + 1];
+                if (rightSibling.KeysCount > minKeys)
+                {
+                    BorrowFromRightSibling(parent, childIndex, child, rightSibling);
+                    return new DeleteResult(true, false);
+                }
+            }
+
+            // If borrowing not possible, merge with a sibling
+            if (childIndex > 0)
+            {
+                MergeWithLeftSibling(parent, childIndex);
+            }
+            else
+            {
+                MergeWithRightSibling(parent, childIndex);
+            }
+
+            // Check if parent needs rebalancing
+            bool parentNeedsRebalancing = parent.KeysCount < minKeys;
+            return new DeleteResult(true, parentNeedsRebalancing);
+        }
+
+        private void BorrowFromLeftSibling(InternalNode parent, int childIndex, INode child, INode leftSibling)
+        {
+            if (child is LeafNode leafNode && leftSibling is LeafNode leftLeaf)
+            {
+                // Move the largest key from left sibling to child
+                int borrowedKey = leftLeaf.Keys[leftLeaf.KeysCount - 1];
+                InsertIntoLeaf(leafNode, borrowedKey);
+                leftLeaf.KeysCount--;
+
+                // Update parent key
+                parent.Keys[childIndex - 1] = leafNode.Keys[0];
+            }
+            else if (child is InternalNode internalNode && leftSibling is InternalNode leftInternal)
+            {
+                // Move the parent key down
+                ShiftRightAndInsertKey(internalNode, parent.Keys[childIndex - 1], 0);
+
+                // Move the last child pointer from left sibling
+                ShiftRightAndInsertChild(internalNode, leftInternal.Children[leftInternal.KeysCount], 0);
+
+                // Move the largest key from left sibling to parent
+                parent.Keys[childIndex - 1] = leftInternal.Keys[leftInternal.KeysCount - 1];
+
+                leftInternal.KeysCount--;
+            }
+        }
+
+        private void BorrowFromRightSibling(InternalNode parent, int childIndex, INode child, INode rightSibling)
+        {
+            if (child is LeafNode leafNode && rightSibling is LeafNode rightLeaf)
+            {
+                // Move the smallest key from right sibling to child
+                int borrowedKey = rightLeaf.Keys[0];
+                InsertIntoLeaf(leafNode, borrowedKey);
+
+                // Shift keys in right sibling
+                for (int i = 0; i < rightLeaf.KeysCount - 1; i++)
+                {
+                    rightLeaf.Keys[i] = rightLeaf.Keys[i + 1];
+                }
+                rightLeaf.KeysCount--;
+
+                // Update parent key
+                parent.Keys[childIndex] = rightLeaf.Keys[0];
+            }
+            else if (child is InternalNode internalNode && rightSibling is InternalNode rightInternal)
+            {
+                // Move the parent key down
+                internalNode.Keys[internalNode.KeysCount] = parent.Keys[childIndex];
+
+                // Move the first child pointer from right sibling
+                internalNode.Children[internalNode.KeysCount + 1] = rightInternal.Children[0];
+
+                // Move the smallest key from right sibling to parent
+                parent.Keys[childIndex] = rightInternal.Keys[0];
+
+                // Shift keys and children in right sibling
+                for (int i = 0; i < rightInternal.KeysCount - 1; i++)
+                {
+                    rightInternal.Keys[i] = rightInternal.Keys[i + 1];
+                    rightInternal.Children[i] = rightInternal.Children[i + 1];
+                }
+                rightInternal.Children[rightInternal.KeysCount - 1] = rightInternal.Children[rightInternal.KeysCount];
+                rightInternal.KeysCount--;
+
+                internalNode.KeysCount++;
+            }
+        }
+
+        private void MergeWithLeftSibling(InternalNode parent, int childIndex)
+        {
+            INode leftSibling = parent.Children[childIndex - 1];
+            INode child = parent.Children[childIndex];
+
+            if (child is LeafNode leafNode && leftSibling is LeafNode leftLeaf)
+            {
+                // Copy all keys from child to left sibling
+                for (int i = 0; i < leafNode.KeysCount; i++)
+                {
+                    leftLeaf.Keys[leftLeaf.KeysCount + i] = leafNode.Keys[i];
+                }
+                leftLeaf.KeysCount += leafNode.KeysCount;
+
+                // Update leaf node links
+                leftLeaf.Next = leafNode.Next;
+                if (leafNode.Next != null)
+                {
+                    leafNode.Next.Prev = leftLeaf;
+                }
+            }
+            else if (child is InternalNode internalNode && leftSibling is InternalNode leftInternal)
+            {
+                // Move parent key to left sibling
+                leftInternal.Keys[leftInternal.KeysCount] = parent.Keys[childIndex - 1];
+                leftInternal.KeysCount++;
+
+                // Copy all keys and children from child to left sibling
+                for (int i = 0; i < internalNode.KeysCount; i++)
+                {
+                    leftInternal.Keys[leftInternal.KeysCount + i] = internalNode.Keys[i];
+                    leftInternal.Children[leftInternal.KeysCount + i] = internalNode.Children[i];
+                }
+                leftInternal.Children[leftInternal.KeysCount + internalNode.KeysCount] = internalNode.Children[internalNode.KeysCount];
+                leftInternal.KeysCount += internalNode.KeysCount;
+            }
+
+            // Remove parent key and child pointer
+            for (int i = childIndex - 1; i < parent.KeysCount - 1; i++)
+            {
+                parent.Keys[i] = parent.Keys[i + 1];
+                parent.Children[i + 1] = parent.Children[i + 2];
+            }
+            parent.KeysCount--;
+        }
+
+        private void MergeWithRightSibling(InternalNode parent, int childIndex)
+        {
+            INode child = parent.Children[childIndex];
+            INode rightSibling = parent.Children[childIndex + 1];
+
+            if (child is LeafNode leafNode && rightSibling is LeafNode rightLeaf)
+            {
+                // Copy all keys from right sibling to child
+                for (int i = 0; i < rightLeaf.KeysCount; i++)
+                {
+                    leafNode.Keys[leafNode.KeysCount + i] = rightLeaf.Keys[i];
+                }
+                leafNode.KeysCount += rightLeaf.KeysCount;
+
+                // Update leaf node links
+                leafNode.Next = rightLeaf.Next;
+                if (rightLeaf.Next != null)
+                {
+                    rightLeaf.Next.Prev = leafNode;
+                }
+            }
+            else if (child is InternalNode internalNode && rightSibling is InternalNode rightInternal)
+            {
+                // Move parent key to child
+                internalNode.Keys[internalNode.KeysCount] = parent.Keys[childIndex];
+                internalNode.KeysCount++;
+
+                // Copy all keys and children from right sibling to child
+                for (int i = 0; i < rightInternal.KeysCount; i++)
+                {
+                    internalNode.Keys[internalNode.KeysCount + i] = rightInternal.Keys[i];
+                    internalNode.Children[internalNode.KeysCount + i] = rightInternal.Children[i];
+                }
+                internalNode.Children[internalNode.KeysCount + rightInternal.KeysCount] = rightInternal.Children[rightInternal.KeysCount];
+                internalNode.KeysCount += rightInternal.KeysCount;
+            }
+
+            // Remove parent key and child pointer
+            for (int i = childIndex; i < parent.KeysCount - 1; i++)
+            {
+                parent.Keys[i] = parent.Keys[i + 1];
+                parent.Children[i + 1] = parent.Children[i + 2];
+            }
+            parent.KeysCount--;
+        }
+
+        private void ShiftRightAndInsertKey(InternalNode node, int key, int position)
+        {
+            for (int i = node.KeysCount; i > position; i--)
+            {
+                node.Keys[i] = node.Keys[i - 1];
+            }
+            node.Keys[position] = key;
+            node.KeysCount++;
+        }
+
+        private void ShiftRightAndInsertChild(InternalNode node, INode child, int position)
+        {
+            for (int i = node.KeysCount + 1; i > position; i--)
+            {
+                node.Children[i] = node.Children[i - 1];
+            }
+            node.Children[position] = child;
+        }
+
+        #endregion
+
+        #region Print
+        public void PrintLevelOrderTraversal()
         {
             if (_root == null)
             {
@@ -244,7 +617,7 @@
             }
         }
 
-        public void LeafListTraversal(int k, bool forward = true)
+        public void PrintLeafListTraversal(int k, bool forward = true)
         {
             var node = FindNodeWithKey(_root, k);
             var tmp = node;
@@ -269,45 +642,6 @@
                 }
             }
         }
-
-        private LeafNode? FindNodeWithKey(INode? node, int key)
-        {
-            if (node == null)
-            {
-                return null;
-            }
-
-            int i = 0;
-
-            while (i < node.KeysCount && key >= node.Keys[i])
-            {
-                i++;
-            }
-
-            if (node is LeafNode leaf)
-            {
-                for (int j = 0; j < leaf.KeysCount; j++)
-                {
-                    if (leaf.Keys[j] == key)
-                    {
-                        return leaf;
-                    }
-                }
-                return null;
-            }
-            else if (node is InternalNode ino)
-            {
-                return FindNodeWithKey(ino.Children[i], key);
-            }
-            else
-            {
-                throw new Exception("Unexpected node type");
-            }
-        }
-
-        public LeafNode? Search(int key)
-        {
-            return FindNodeWithKey(_root, key);
-        }
+        #endregion
     }
 }
