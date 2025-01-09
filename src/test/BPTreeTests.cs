@@ -27,20 +27,16 @@ namespace Norbula.BPTree.BPTreeTest
                 if (tree.Search(1) != null)
                 {
                     Console.WriteLine($"PASS: {testName}");
-
                 }
                 else
                 {
                     Console.WriteLine($"FAILED: {testName}");
-
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"FAILED: {testName} {ex}");
-
             }
-
         }
 
         public static void Insert_100Elements_Checks_SortForward()
